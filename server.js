@@ -58,7 +58,7 @@ async function getFetch() {
   return mod.default;
 }
 
-// ✅ Validate (protected) — FULL geocoding + components + lat/lon
+// ✅ Validate (protected) — FULL geocoding + components + lat/lon + TRUE confidence
 app.post("/validate", requireApiKey, async (req, res) => {
   try {
     const address = (req.body?.address || "").trim();
@@ -68,10 +68,10 @@ app.post("/validate", requireApiKey, async (req, res) => {
 
     const fetch = await getFetch();
 
-    // Nominatim endpoint
-    const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(
-      address
-    )}`;
+    // ✅ Use jsonv2 + addressdetails for better structured response
+    const url =
+      `https://nominatim.openstreetmap.org/search` +
+      `?format=jsonv2&addressdetails=1&limit=1&q=${encodeURIComponent(address)}`;
 
     const geoRes = await fetch(url, {
       headers: {
@@ -98,7 +98,7 @@ app.post("/validate", requireApiKey, async (req, res) => {
         valid: false,
         confidence: 0,
         input: address,
-        normalized: address,
+        normalized: "",
         components: {},
         lat: null,
         lon: null,
@@ -109,20 +109,34 @@ app.post("/validate", requireApiKey, async (req, res) => {
     const best = data[0];
     const components = best.address || {};
 
-    // Confidence (simple + honest)
-    // Nominatim gives "importance" sometimes (0..1). We'll map it to 0..100.
-    const importance = typeof best.importance === "number" ? best.importance : null;
-    const confidence = importance !== null ? Math.round(Math.min(1, Math.max(0, importance)) * 100) : 100;
+    // ✅ Decide if it's a FULL address match (house # is critical)
+    const hasHouse = !!components.house_number;
+    const hasRoad  = !!components.road;
+    const hasCity  = !!(components.city || components.town || components.village);
+    const hasState = !!components.state;
+    const hasZip   = !!components.postcode;
+
+    const valid = hasHouse && hasRoad && hasCity && hasState && hasZip;
+
+    // ✅ Confidence scoring (simple + predictable)
+    // House # weighted highest because that's what makes it “whole address”
+    let confidence = 0;
+    if (hasHouse) confidence += 40;
+    if (hasRoad)  confidence += 20;
+    if (hasCity)  confidence += 15;
+    if (hasState) confidence += 15;
+    if (hasZip)   confidence += 10;
+    confidence = Math.min(100, confidence);
 
     return res.json({
       ok: true,
-      valid: true,
+      valid,
       confidence,
       input: address,
       normalized: best.display_name || address,
       components,
-      lat: best.lat || null,
-      lon: best.lon || null,
+      lat: best.lat ? String(best.lat) : null,
+      lon: best.lon ? String(best.lon) : null,
       source: "osm-nominatim",
     });
   } catch (e) {
