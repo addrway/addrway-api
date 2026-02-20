@@ -5,12 +5,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// health check
+// Health
 app.get("/", (req, res) => res.json({ ok: true, service: "addrway-api" }));
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 function scoreFromComponents(c = {}) {
-  // Basic “full address” scoring
   const hasHouse = !!c.house_number;
   const hasRoad = !!c.road;
   const hasCity = !!(c.city || c.town || c.village);
@@ -24,25 +23,24 @@ function scoreFromComponents(c = {}) {
   if (hasState) score += 15;
   if (hasZip) score += 10;
 
-  const valid = hasHouse && hasRoad && hasCity && hasState; // “whole address” threshold
+  const valid = hasHouse && hasRoad && hasCity && hasState;
   return { score, valid };
 }
 
 app.post("/validate", async (req, res) => {
   const { address } = req.body || {};
-  if (!address || typeof address !== "string") {
-    return res.status(400).json({ error: "Missing address string" });
+
+  if (!address) {
+    return res.status(400).json({ error: "Address required" });
   }
 
   try {
-    // Nominatim search (address -> best match)
     const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(address)}`;
 
     const r = await fetch(url, {
       headers: {
         "Accept": "application/json",
-        // Nominatim expects an identifying UA (keep it simple)
-        "User-Agent": "Addrway/1.0 (contact: support@addrway.com)"
+        "User-Agent": "Addrway/1.0"
       }
     });
 
@@ -53,8 +51,7 @@ app.post("/validate", async (req, res) => {
         valid: false,
         confidence: 0,
         normalized: address,
-        components: {},
-        message: "No match found"
+        components: {}
       });
     }
 
@@ -66,17 +63,17 @@ app.post("/validate", async (req, res) => {
 
     return res.json({
       valid,
-      confidence: score,          // 0–100
-      normalized,                 // pretty normalized string
-      components,                 // contains house_number, road, city, state, postcode, etc.
+      confidence: score,
+      normalized,
+      components,
       lat: best.lat,
-      lon: best.lon,
-      source: "osm-nominatim"
+      lon: best.lon
     });
+
   } catch (err) {
-    return res.status(500).json({ error: "Validation failed", details: String(err) });
+    return res.status(500).json({ error: "Validation failed" });
   }
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Addrway API running on ${PORT}`));
+app.listen(PORT, () => console.log("API running on", PORT));
