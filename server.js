@@ -5,14 +5,12 @@ import rateLimit from "express-rate-limit";
 const app = express();
 app.use(express.json());
 
-// ✅ CORS: allow only your site (set in DigitalOcean env)
-// Example: https://addrway.github.io  OR your custom domain later
+// ✅ CORS
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
 
 app.use(
   cors({
     origin: (origin, cb) => {
-      // allow server-to-server calls (no origin) and allow our site
       if (!origin) return cb(null, true);
       if (ALLOWED_ORIGIN === "*") return cb(null, true);
       if (origin === ALLOWED_ORIGIN) return cb(null, true);
@@ -21,27 +19,24 @@ app.use(
   })
 );
 
-// ✅ Rate limit: protects you from spam
-// Adjust later per pricing tier.
+// ✅ Rate limit
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // 200 requests per 15 min per IP
+  windowMs: 15 * 60 * 1000,
+  max: 200,
   standardHeaders: true,
   legacyHeaders: false,
 });
 app.use(limiter);
 
-// ✅ API Key protection (set in DigitalOcean env)
+// ✅ API Key
 const API_KEY = process.env.API_KEY;
 
-// Health
+// Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "addrway-api" });
 });
 
-// ✅ Middleware: require API key for protected routes
 function requireApiKey(req, res, next) {
-  // If you haven't set an API_KEY yet, allow temporarily (so you don’t lock yourself out).
   if (!API_KEY) return next();
 
   const key = req.header("x-api-key");
@@ -51,14 +46,14 @@ function requireApiKey(req, res, next) {
   next();
 }
 
-// ✅ fetch helper (works on Node 18+ OR falls back to node-fetch)
+// Fetch helper
 async function getFetch() {
   if (globalThis.fetch) return globalThis.fetch;
   const mod = await import("node-fetch");
   return mod.default;
 }
 
-// ✅ Validate (protected) — FULL geocoding + components + lat/lon + TRUE confidence
+// ✅ VALIDATE ROUTE
 app.post("/validate", requireApiKey, async (req, res) => {
   try {
     const address = (req.body?.address || "").trim();
@@ -68,7 +63,6 @@ app.post("/validate", requireApiKey, async (req, res) => {
 
     const fetch = await getFetch();
 
-    // ✅ Use jsonv2 + addressdetails for better structured response
     const url =
       `https://nominatim.openstreetmap.org/search` +
       `?format=jsonv2&addressdetails=1&limit=1&q=${encodeURIComponent(address)}`;
@@ -76,7 +70,6 @@ app.post("/validate", requireApiKey, async (req, res) => {
     const geoRes = await fetch(url, {
       headers: {
         Accept: "application/json",
-        // Nominatim prefers a descriptive UA:
         "User-Agent": "addrway-api/1.0 (Addrway Address Validation)",
       },
     });
@@ -91,7 +84,6 @@ app.post("/validate", requireApiKey, async (req, res) => {
 
     const data = await geoRes.json();
 
-    // No match
     if (!Array.isArray(data) || data.length === 0) {
       return res.json({
         ok: true,
@@ -109,24 +101,31 @@ app.post("/validate", requireApiKey, async (req, res) => {
     const best = data[0];
     const components = best.address || {};
 
-    // ✅ Decide if it's a FULL address match (house # is critical)
+    // ✅ Component checks
     const hasHouse = !!components.house_number;
     const hasRoad  = !!components.road;
     const hasCity  = !!(components.city || components.town || components.village);
     const hasState = !!components.state;
     const hasZip   = !!components.postcode;
 
+    // ✅ Strict full-address validity
     const valid = hasHouse && hasRoad && hasCity && hasState && hasZip;
 
-    // ✅ Confidence scoring (simple + predictable)
-    // House # weighted highest because that's what makes it “whole address”
+    // ✅ Confidence scoring
     let confidence = 0;
     if (hasHouse) confidence += 40;
     if (hasRoad)  confidence += 20;
     if (hasCity)  confidence += 15;
     if (hasState) confidence += 15;
     if (hasZip)   confidence += 10;
-    confidence = Math.min(100, confidence);
+
+    // ✅ ZIP mismatch penalty
+    const userZipMatch = address.match(/\b\d{5}\b/);
+    const userZip = userZipMatch ? userZipMatch[0] : null;
+
+    if (userZip && components.postcode && userZip !== components.postcode) {
+      confidence = Math.max(0, confidence - 25);
+    }
 
     return res.json({
       ok: true,
@@ -135,10 +134,11 @@ app.post("/validate", requireApiKey, async (req, res) => {
       input: address,
       normalized: best.display_name || address,
       components,
-      lat: best.lat ? String(best.lat) : null,
-      lon: best.lon ? String(best.lon) : null,
+      lat: best.lat || null,
+      lon: best.lon || null,
       source: "osm-nominatim",
     });
+
   } catch (e) {
     console.error(e);
     return res.status(500).json({ ok: false, error: "Server error" });
