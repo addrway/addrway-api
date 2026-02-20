@@ -41,8 +41,7 @@ app.get("/", (req, res) => {
 
 // ✅ Middleware: require API key for protected routes
 function requireApiKey(req, res, next) {
-  // If you haven't set an API_KEY yet, we allow temporarily (so you don’t lock yourself out).
-  // Once you set it in DigitalOcean, it becomes enforced automatically.
+  // If you haven't set an API_KEY yet, allow temporarily (so you don’t lock yourself out).
   if (!API_KEY) return next();
 
   const key = req.header("x-api-key");
@@ -52,7 +51,14 @@ function requireApiKey(req, res, next) {
   next();
 }
 
-// ✅ Validate (protected)
+// ✅ fetch helper (works on Node 18+ OR falls back to node-fetch)
+async function getFetch() {
+  if (globalThis.fetch) return globalThis.fetch;
+  const mod = await import("node-fetch");
+  return mod.default;
+}
+
+// ✅ Validate (protected) — FULL geocoding + components + lat/lon
 app.post("/validate", requireApiKey, async (req, res) => {
   try {
     const address = (req.body?.address || "").trim();
@@ -60,18 +66,64 @@ app.post("/validate", requireApiKey, async (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing address" });
     }
 
-    // For now: your current working logic (OSM/Nominatim style)
-    // If you already added the enhanced response (lat/lon/components/confidence),
-    // keep that logic here and just leave the protection above.
-    // ---- Example minimal response fallback:
-    const normalized = address;
-    const valid = normalized.length > 6;
+    const fetch = await getFetch();
+
+    // Nominatim endpoint
+    const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(
+      address
+    )}`;
+
+    const geoRes = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        // Nominatim prefers a descriptive UA:
+        "User-Agent": "addrway-api/1.0 (Addrway Address Validation)",
+      },
+    });
+
+    if (!geoRes.ok) {
+      return res.status(502).json({
+        ok: false,
+        error: "Geocoding provider error",
+        status: geoRes.status,
+      });
+    }
+
+    const data = await geoRes.json();
+
+    // No match
+    if (!Array.isArray(data) || data.length === 0) {
+      return res.json({
+        ok: true,
+        valid: false,
+        confidence: 0,
+        input: address,
+        normalized: address,
+        components: {},
+        lat: null,
+        lon: null,
+        source: "osm-nominatim",
+      });
+    }
+
+    const best = data[0];
+    const components = best.address || {};
+
+    // Confidence (simple + honest)
+    // Nominatim gives "importance" sometimes (0..1). We'll map it to 0..100.
+    const importance = typeof best.importance === "number" ? best.importance : null;
+    const confidence = importance !== null ? Math.round(Math.min(1, Math.max(0, importance)) * 100) : 100;
 
     return res.json({
-      valid,
-      confidence: valid ? 100 : 0,
-      normalized,
-      source: "demo",
+      ok: true,
+      valid: true,
+      confidence,
+      input: address,
+      normalized: best.display_name || address,
+      components,
+      lat: best.lat || null,
+      lon: best.lon || null,
+      source: "osm-nominatim",
     });
   } catch (e) {
     console.error(e);
