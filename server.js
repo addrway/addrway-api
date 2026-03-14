@@ -33,9 +33,34 @@ app.use(limiter);
 // ✅ API Key
 const API_KEY = process.env.API_KEY;
 
+// ✅ Temporary in-memory customer counter
+let customerCounter = 0;
+
 // Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "addrway-api" });
+});
+
+// ✅ Create new sequential customer ID
+app.post("/create-customer-id", (req, res) => {
+  try {
+    customerCounter += 1;
+
+    const customerId = `AW-${String(customerCounter).padStart(6, "0")}`;
+
+    return res.json({
+      ok: true,
+      customerId,
+      counter: customerCounter,
+    });
+  } catch (error) {
+    console.error("Customer ID error:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to create customer ID",
+    });
+  }
 });
 
 function requireApiKey(req, res, next) {
