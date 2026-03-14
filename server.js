@@ -1,9 +1,11 @@
 import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import generateInvoice from "./invoiceGenerator.js";
 
 const app = express();
 app.use(express.json());
+app.use("/invoices", express.static("invoices"));
 
 // ✅ CORS
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
@@ -57,8 +59,12 @@ async function getFetch() {
 app.post("/validate", requireApiKey, async (req, res) => {
   try {
     const address = (req.body?.address || "").trim();
+
     if (!address) {
-      return res.status(400).json({ ok: false, error: "Missing address" });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing address",
+      });
     }
 
     const fetch = await getFetch();
@@ -101,25 +107,21 @@ app.post("/validate", requireApiKey, async (req, res) => {
     const best = data[0];
     const components = best.address || {};
 
-    // ✅ Component checks
     const hasHouse = !!components.house_number;
-    const hasRoad  = !!components.road;
-    const hasCity  = !!(components.city || components.town || components.village);
+    const hasRoad = !!components.road;
+    const hasCity = !!(components.city || components.town || components.village);
     const hasState = !!components.state;
-    const hasZip   = !!components.postcode;
+    const hasZip = !!components.postcode;
 
-    // ✅ Strict full-address validity
     const valid = hasHouse && hasRoad && hasCity && hasState && hasZip;
 
-    // ✅ Confidence scoring
     let confidence = 0;
     if (hasHouse) confidence += 40;
-    if (hasRoad)  confidence += 20;
-    if (hasCity)  confidence += 15;
+    if (hasRoad) confidence += 20;
+    if (hasCity) confidence += 15;
     if (hasState) confidence += 15;
-    if (hasZip)   confidence += 10;
+    if (hasZip) confidence += 10;
 
-    // ✅ ZIP mismatch penalty
     const userZipMatch = address.match(/\b\d{5}\b/);
     const userZip = userZipMatch ? userZipMatch[0] : null;
 
@@ -138,10 +140,59 @@ app.post("/validate", requireApiKey, async (req, res) => {
       lon: best.lon || null,
       source: "osm-nominatim",
     });
-
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ ok: false, error: "Server error" });
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+    });
+  }
+});
+
+// ✅ GENERATE INVOICE PDF ROUTE
+app.post("/generate-invoice", async (req, res) => {
+  try {
+    const {
+      accountId,
+      orderId,
+      planId,
+      planName,
+      unitCost,
+      subtotal,
+      tax,
+      total,
+    } = req.body || {};
+
+    if (!accountId || !orderId || !planId || !planName) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required invoice fields",
+      });
+    }
+
+    const fileName = await generateInvoice({
+      accountId,
+      orderId,
+      planId,
+      planName,
+      unitCost: unitCost ?? "0.00",
+      subtotal: subtotal ?? "0.00",
+      tax: tax ?? "0.00",
+      total: total ?? "0.00",
+    });
+
+    return res.json({
+      ok: true,
+      pdf: `/invoices/${fileName}`,
+      fileName,
+    });
+  } catch (error) {
+    console.error("Invoice error:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Invoice generation failed",
+    });
   }
 });
 
