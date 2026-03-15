@@ -36,6 +36,55 @@ const API_KEY = process.env.API_KEY;
 // ✅ Temporary in-memory customer counter
 let customerCounter = 0;
 
+// ✅ Temporary in-memory customer records
+// NOTE: This is temporary. If the server restarts, data resets.
+// Later we should store this in a real database.
+const customerStore = new Map();
+
+/*
+customerStore example:
+{
+  "AW-000001": {
+    customerId: "AW-000001",
+    plan: "starter",
+    used: 42,
+    limit: 5000,
+    createdAt: "2026-03-14T12:00:00.000Z"
+  }
+}
+*/
+
+function normalizePlan(plan) {
+  return String(plan || "").toLowerCase() === "starter" ? "starter" : "basic";
+}
+
+function getPlanLimit(plan) {
+  return normalizePlan(plan) === "starter" ? 5000 : 1000;
+}
+
+function formatPlanName(plan) {
+  return normalizePlan(plan) === "starter" ? "Starter" : "Basic";
+}
+
+function getOrCreateCustomerRecord(customerId) {
+  if (!customerStore.has(customerId)) {
+    const defaultPlan = "basic";
+    customerStore.set(customerId, {
+      customerId,
+      plan: defaultPlan,
+      used: 0,
+      limit: getPlanLimit(defaultPlan),
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  const record = customerStore.get(customerId);
+  record.plan = normalizePlan(record.plan);
+  record.limit = getPlanLimit(record.plan);
+
+  return record;
+}
+
 // Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "addrway-api" });
@@ -48,10 +97,23 @@ app.post("/create-customer-id", (req, res) => {
 
     const customerId = `AW-${String(customerCounter).padStart(6, "0")}`;
 
+    // ✅ create default customer record
+    const defaultPlan = "basic";
+    customerStore.set(customerId, {
+      customerId,
+      plan: defaultPlan,
+      used: 0,
+      limit: getPlanLimit(defaultPlan),
+      createdAt: new Date().toISOString(),
+    });
+
     return res.json({
       ok: true,
       customerId,
       counter: customerCounter,
+      plan: formatPlanName(defaultPlan),
+      used: 0,
+      limit: getPlanLimit(defaultPlan),
     });
   } catch (error) {
     console.error("Customer ID error:", error);
@@ -80,15 +142,131 @@ async function getFetch() {
   return mod.default;
 }
 
-// ✅ VALIDATE ROUTE
+// ✅ Get customer usage + plan
+app.get("/customer/:customerId", (req, res) => {
+  try {
+    const customerId = String(req.params.customerId || "").trim();
+
+    if (!customerId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing customer ID",
+      });
+    }
+
+    const record = getOrCreateCustomerRecord(customerId);
+
+    return res.json({
+      ok: true,
+      customerId: record.customerId,
+      plan: formatPlanName(record.plan),
+      used: record.used,
+      limit: record.limit,
+      createdAt: record.createdAt,
+    });
+  } catch (error) {
+    console.error("Customer fetch error:", error);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to fetch customer data",
+    });
+  }
+});
+
+// ✅ Set customer plan
+app.post("/set-plan", (req, res) => {
+  try {
+    const { customerId, plan } = req.body || {};
+
+    if (!customerId || !plan) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing customerId or plan",
+      });
+    }
+
+    const record = getOrCreateCustomerRecord(String(customerId).trim());
+    record.plan = normalizePlan(plan);
+    record.limit = getPlanLimit(record.plan);
+
+    return res.json({
+      ok: true,
+      customerId: record.customerId,
+      plan: formatPlanName(record.plan),
+      used: record.used,
+      limit: record.limit,
+    });
+  } catch (error) {
+    console.error("Set plan error:", error);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to update customer plan",
+    });
+  }
+});
+
+// ✅ Reset monthly usage for a customer (temporary helper)
+app.post("/reset-usage", (req, res) => {
+  try {
+    const { customerId } = req.body || {};
+
+    if (!customerId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing customerId",
+      });
+    }
+
+    const record = getOrCreateCustomerRecord(String(customerId).trim());
+    record.used = 0;
+
+    return res.json({
+      ok: true,
+      customerId: record.customerId,
+      plan: formatPlanName(record.plan),
+      used: record.used,
+      limit: record.limit,
+    });
+  } catch (error) {
+    console.error("Reset usage error:", error);
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to reset usage",
+    });
+  }
+});
+
+// ✅ VALIDATE ROUTE WITH PLAN CAP ENFORCEMENT
 app.post("/validate", requireApiKey, async (req, res) => {
   try {
     const address = (req.body?.address || "").trim();
+    const customerId = String(req.header("x-customer-id") || "").trim();
+
+    if (!customerId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing customer ID",
+      });
+    }
 
     if (!address) {
       return res.status(400).json({
         ok: false,
         error: "Missing address",
+      });
+    }
+
+    const customer = getOrCreateCustomerRecord(customerId);
+
+    // ✅ block lookup if customer reached cap
+    if (customer.used >= customer.limit) {
+      return res.status(403).json({
+        ok: false,
+        error: "Monthly validation cap reached",
+        customerId: customer.customerId,
+        plan: formatPlanName(customer.plan),
+        used: customer.used,
+        limit: customer.limit,
       });
     }
 
@@ -115,6 +293,9 @@ app.post("/validate", requireApiKey, async (req, res) => {
 
     const data = await geoRes.json();
 
+    // ✅ count the lookup attempt
+    customer.used += 1;
+
     if (!Array.isArray(data) || data.length === 0) {
       return res.json({
         ok: true,
@@ -126,6 +307,13 @@ app.post("/validate", requireApiKey, async (req, res) => {
         lat: null,
         lon: null,
         source: "osm-nominatim",
+        usage: {
+          customerId: customer.customerId,
+          plan: formatPlanName(customer.plan),
+          used: customer.used,
+          limit: customer.limit,
+          remaining: Math.max(customer.limit - customer.used, 0),
+        },
       });
     }
 
@@ -164,6 +352,13 @@ app.post("/validate", requireApiKey, async (req, res) => {
       lat: best.lat || null,
       lon: best.lon || null,
       source: "osm-nominatim",
+      usage: {
+        customerId: customer.customerId,
+        plan: formatPlanName(customer.plan),
+        used: customer.used,
+        limit: customer.limit,
+        remaining: Math.max(customer.limit - customer.used, 0),
+      },
     });
   } catch (e) {
     console.error(e);
